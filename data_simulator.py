@@ -19,7 +19,21 @@ import pandas as pd
 from datetime import datetime
 import time
 import psutil
+import socket
+import platform
 from cluster_config import CLUSTER_NODES
+
+
+def _machine_name() -> str:
+    """Best-effort real computer name of THIS machine."""
+    for fn in (platform.node, socket.gethostname):
+        try:
+            n = (fn() or "").strip()
+            if n:
+                return n
+        except Exception:
+            pass
+    return "This PC"
 
 # ─── SIMULATION STATE ────────────────────────────────────────────
 _sim_state = {
@@ -83,6 +97,24 @@ def set_live_mode(enabled: bool, node_id: int = 1):
             _live_enabled = False
 
 
+def _live_gpu_label() -> str:
+    """Real GPU/graphics name of THIS machine for the live node.
+    Falls back to integrated-graphics/CPU wording instead of a fake datacenter GPU."""
+    try:
+        if _live_collector is not None:
+            mi = _live_collector.get_mode_info()
+            det = mi.get("detected_gpus") or []
+            if det and det[0].get("name"):
+                return str(det[0]["name"])
+    except Exception:
+        pass
+    try:
+        cpu = (platform.processor() or "").strip()
+    except Exception:
+        cpu = ""
+    return f"Integrated Graphics · {cpu}" if cpu else "Integrated Graphics (shared memory)"
+
+
 def _get_live_data():
     """
     Return (readings, is_real_gpu).
@@ -107,7 +139,7 @@ def _get_live_data():
 def live_mode_info() -> dict:
     """Report current live-mode status for the dashboard header/badges."""
     info = {"enabled": False, "is_real_gpu": False, "mode": None,
-            "num_live": 0, "gpu_name": None}
+            "num_live": 0, "gpu_name": None, "machine": _machine_name()}
     if not (_live_enabled and _live_collector is not None):
         return info
     try:
@@ -131,7 +163,7 @@ def _get_system_factor() -> float:
     mem = psutil.virtual_memory().percent
     return (cpu + mem) / 200.0
 
-def _generate_node_metrics(node_id, system_factor, live_reading=None, assignment=None) -> dict:
+def _generate_node_metrics(node_id, system_factor, live_reading=None, assignment=None, live_index=0, num_live=0) -> dict:
     cfg = CLUSTER_NODES[node_id]
     state = _sim_state[node_id]
     t = time.time()
@@ -170,17 +202,25 @@ def _generate_node_metrics(node_id, system_factor, live_reading=None, assignment
     # ── LIVE HARDWARE OVERLAY (real readings from this machine) ──
     data_source = "sim"
     gpu_name = None
+    display_name = cfg["display_name"]
+    hostname = cfg["hostname"]
+    gpu_model_out = cfg["gpu_model"]
+    vram_out = vram_gb
     if live_reading is not None:
         try:
             temperature = float(live_reading["temperature"])
             utilization = float(live_reading["utilization"])
             mem_total = float(live_reading.get("memory_total") or vram_gb)
             mem_used = float(live_reading.get("memory_used", 0.0))
-            mem_pct = (mem_used / mem_total) if mem_total else 0.0
-            memory_used = float(np.clip(mem_pct * vram_gb, 0.1, vram_gb))
+            memory_used = float(np.clip(mem_used, 0.1, mem_total))
             power_draw = float(live_reading["power_draw"])
             gpu_name = live_reading.get("gpu_name")
             data_source = "live"
+            vram_out = round(mem_total, 1)
+            gpu_model_out = gpu_name or _live_gpu_label()
+            _pc = _machine_name()
+            display_name = f"{_pc} · GPU{live_index}" if num_live > 1 else _pc
+            hostname = f"{_pc.lower().replace(' ', '-')}.local"
         except Exception:
             data_source = "sim"
 
@@ -220,10 +260,10 @@ def _generate_node_metrics(node_id, system_factor, live_reading=None, assignment
 
     return {
         "node_id": node_id,
-        "hostname": cfg["hostname"],
-        "display_name": cfg["display_name"],
-        "gpu_model": gpu_name or cfg["gpu_model"],
-        "gpu_vram_gb": vram_gb,
+        "hostname": hostname,
+        "display_name": display_name,
+        "gpu_model": gpu_model_out,
+        "gpu_vram_gb": vram_out,
         "current_job": current_job,
         "job_type": job_type,
         "researcher": researcher,
@@ -251,7 +291,7 @@ def generate_metrics() -> pd.DataFrame:
     for idx, node_id in enumerate(CLUSTER_NODES):
         lr = live_readings[idx] if idx < num_live else None
         assignment = _node_jobs.get(node_id)
-        m = _generate_node_metrics(node_id, system_factor, live_reading=lr, assignment=assignment)
+        m = _generate_node_metrics(node_id, system_factor, live_reading=lr, assignment=assignment, live_index=idx, num_live=num_live)
         rows.append(m)
 
         _utilization_history[node_id].append(m["utilization"])

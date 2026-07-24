@@ -9,7 +9,7 @@ Defines the 5 GPU workstations in the lab with their hardware specs and active w
 CLUSTER_NODES = {
     1: {
         "node_id": 1,
-        "hostname": "gpu-lab-01.diu.edu.bd",
+        "hostname": "gpu-lab-01",
         "display_name": "GPU Lab Station #1",
         "gpu_model": "NVIDIA RTX 4090",
         "gpu_vram_gb": 24,
@@ -25,7 +25,7 @@ CLUSTER_NODES = {
     },
     2: {
         "node_id": 2,
-        "hostname": "gpu-lab-02.diu.edu.bd",
+        "hostname": "gpu-lab-02",
         "display_name": "GPU Lab Station #2",
         "gpu_model": "NVIDIA RTX 3090",
         "gpu_vram_gb": 24,
@@ -41,7 +41,7 @@ CLUSTER_NODES = {
     },
     3: {
         "node_id": 3,
-        "hostname": "gpu-lab-03.diu.edu.bd",
+        "hostname": "gpu-lab-03",
         "display_name": "GPU Lab Station #3",
         "gpu_model": "NVIDIA RTX 4080",
         "gpu_vram_gb": 16,
@@ -57,7 +57,7 @@ CLUSTER_NODES = {
     },
     4: {
         "node_id": 4,
-        "hostname": "gpu-lab-04.diu.edu.bd",
+        "hostname": "gpu-lab-04",
         "display_name": "GPU Lab Station #4",
         "gpu_model": "NVIDIA RTX 3080",
         "gpu_vram_gb": 12,
@@ -73,7 +73,7 @@ CLUSTER_NODES = {
     },
     5: {
         "node_id": 5,
-        "hostname": "gpu-lab-05.diu.edu.bd",
+        "hostname": "gpu-lab-05",
         "display_name": "GPU Lab Station #5",
         "gpu_model": "NVIDIA RTX 3070",
         "gpu_vram_gb": 8,

@@ -7,6 +7,8 @@ Station #1 can mirror THIS machine's real hardware telemetry (live mode).
 """
 import time
 from datetime import datetime
+import base64
+from pathlib import Path
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -301,47 +303,59 @@ with st.sidebar:
     paused = st.checkbox("⏸ Pause live refresh", value=False)
     refresh_rate = st.slider("Refresh interval (s)", 2, 10, 4)
 
+# ─── LOAD LOGO ────────────────────────────────
+logo_path = Path("assets/logo.png")
+if logo_path.exists():
+    with open(logo_path, "rb") as f:
+        logo_base64 = base64.b64encode(f.read()).decode()
+else:
+    logo_base64 = ""  # Fallback
+
 # ─── DATA REFRESH ─────────────────────────────
-metrics_df = generate_metrics()
-risk_df = predict_risk(metrics_df)
-data = metrics_df.merge(risk_df[["node_id", "risk_score", "risk_level", "root_cause"]], on="node_id")
+frag = getattr(st, "fragment", None) or getattr(st, "experimental_fragment")
 
-insert_metrics(metrics_df[["node_id", "temperature", "utilization", "memory_used", "power_draw", "timestamp"]].to_dict("records"))
-for _, r in risk_df.iterrows():
-    insert_prediction(r["node_id"], r["risk_score"], r["risk_level"])
+@frag(run_every=(refresh_rate if not paused else None))
+def live_view():
+    metrics_df = generate_metrics()
+    risk_df = predict_risk(metrics_df)
+    data = metrics_df.merge(risk_df[["node_id", "risk_score", "risk_level", "root_cause"]], on="node_id")
 
-# SchedulerAI — pull one job from the queue each refresh
-job_name, best_node, reason = assign_job(metrics_df, risk_df)
-if job_name:
-    log_job(job_name, best_node, reason)
-    cfg = CLUSTER_NODES.get(best_node, {})
-    st.session_state["job_logs"].insert(0, f'<b>{job_name}</b> → {cfg.get("hostname", "Node " + str(best_node))} | {reason}')
+    insert_metrics(metrics_df[["node_id", "temperature", "utilization", "memory_used", "power_draw", "timestamp"]].to_dict("records"))
+    for _, r in risk_df.iterrows():
+        insert_prediction(r["node_id"], r["risk_score"], r["risk_level"])
 
-# Migration check
-for m in check_migration(metrics_df, risk_df):
-    st.session_state["migration_logs"].insert(0, f'Node {m["node_id"]} ({CLUSTER_NODES[m["node_id"]]["hostname"]}) — Risk {m["risk_score"]}% — {m["action"]}')
-    st.session_state["total_prevented_crashes"] += 1
+    # SchedulerAI — pull one job from the queue each refresh
+    job_name, best_node, reason = assign_job(metrics_df, risk_df)
+    if job_name:
+        log_job(job_name, best_node, reason)
+        cfg = CLUSTER_NODES.get(best_node, {})
+        st.session_state["job_logs"].insert(0, f'<b>{job_name}</b> → {cfg.get("hostname", "Node " + str(best_node))} | {reason}')
 
-cost = get_cost_summary()
+    # Migration check
+    for m in check_migration(metrics_df, risk_df):
+        st.session_state["migration_logs"].insert(0, f'Node {m["node_id"]} ({CLUSTER_NODES[m["node_id"]]["hostname"]}) — Risk {m["risk_score"]}% — {m["action"]}')
+        st.session_state["total_prevented_crashes"] += 1
 
-# Real energy from measured power draw (live node reports real watts)
-real_power_kw = float(data["power_draw"].sum()) / 1000.0
-live_power_w = float(data[data["data_source"] == "live"]["power_draw"].sum())
-_bdt_per_usd = COST_PER_GPU_PER_HOUR_BDT / COST_PER_GPU_PER_HOUR_USD
-elec_usd_kwh = ELECTRICITY_PER_KWH_BDT / _bdt_per_usd
-real_cost_usd_hr = real_power_kw * elec_usd_kwh
+    cost = get_cost_summary()
 
-# Live-mode presentation values
-_lm = live_mode_info()
-live_badge = ("🛰 LIVE HW" if _lm["is_real_gpu"] else "🛰 LIVE · SYS") if _lm["enabled"] else ""
-live_label = "LIVE HW · 5 NODES" if (_lm["enabled"] and _lm["is_real_gpu"]) else "LIVE · 5 NODES"
+    # Real energy from measured power draw (live node reports real watts)
+    real_power_kw = float(data["power_draw"].sum()) / 1000.0
+    live_power_w = float(data[data["data_source"] == "live"]["power_draw"].sum())
+    _bdt_per_usd = COST_PER_GPU_PER_HOUR_BDT / COST_PER_GPU_PER_HOUR_USD
+    elec_usd_kwh = ELECTRICITY_PER_KWH_BDT / _bdt_per_usd
+    real_cost_usd_hr = real_power_kw * elec_usd_kwh
 
-# ─── HEADER ──────────────────────────────
-now = datetime.now()
-st.markdown(f"""
+    # Live-mode presentation values
+    _lm = live_mode_info()
+    live_badge = ("🛰 LIVE HW" if _lm["is_real_gpu"] else "🛰 LIVE · SYS") if _lm["enabled"] else ""
+    live_label = "LIVE HW · 5 NODES" if (_lm["enabled"] and _lm["is_real_gpu"]) else "LIVE · 5 NODES"
+
+    # ─── HEADER ──────────────────────────────
+    now = datetime.now()
+    st.markdown(f"""
 <div class="top">
   <div class="brand">
-    <div class="logo">🧠</div>
+    <img src="data:image/png;base64,{{logo_base64}}" class="logo-img" style="width:50px;height:50px;border-radius:12px;"/>
     <div><h1>TensorTitan</h1><p>GPU Cluster Intelligence Console · DIU CSE AI Research Lab</p></div>
   </div>
   <div class="top-right">
@@ -349,199 +363,199 @@ st.markdown(f"""
     <div class="live"><span class="ldot"></span>{live_label}</div>
   </div>
 </div>
-""", unsafe_allow_html=True)
+""".replace("{logo_base64}", logo_base64), unsafe_allow_html=True)
 
-# ─── KPI STRIP ───────────────────────────
-# Overload & live-workload notifications
-_overloaded = data[(data["risk_level"] == "Critical") | (data["utilization"] >= 96)]
-if len(_overloaded):
-    _names = ", ".join(_overloaded["display_name"].tolist())
-    st.markdown(f'<div class="topalert"><span class="rdot"></span>⚠ OVERLOAD — {_names} cannot accept more load (Critical / GPU maxed). SchedulerAI is rerouting workloads.</div>', unsafe_allow_html=True)
-    if st.session_state.get("_ovl") != _names:
-        st.toast(f"🚨 Overload: {_names}", icon="🚨")
-        st.session_state["_ovl"] = _names
-else:
-    st.session_state["_ovl"] = ""
+    # ─── KPI STRIP ───────────────────────────
+    # Overload & live-workload notifications
+    _overloaded = data[(data["risk_level"] == "Critical") | (data["utilization"] >= 96)]
+    if len(_overloaded):
+        _names = ", ".join(_overloaded["display_name"].tolist())
+        st.markdown(f'<div class="topalert"><span class="rdot"></span>⚠ OVERLOAD — {_names} cannot accept more load (Critical / GPU maxed). SchedulerAI is rerouting workloads.</div>', unsafe_allow_html=True)
+        if st.session_state.get("_ovl") != _names:
+            st.toast(f"🚨 Overload: {_names}", icon="🚨")
+            st.session_state["_ovl"] = _names
+    else:
+        st.session_state["_ovl"] = ""
 
-_ws = workload_status()
-if _ws.get("running"):
-    _wcfg = CLUSTER_NODES.get(_ws.get("node"), {})
-    st.markdown(f'<div class="topalert" style="background:rgba(45,212,191,.08);border-color:rgba(45,212,191,.4);border-left-color:#2DD4BF;color:#8ff0e4;"><span class="rdot" style="background:#2DD4BF;"></span>🔴 REAL WORKLOAD RUNNING — <b>{_ws.get("job")}</b> on {_wcfg.get("display_name","live node")} · {str(_ws.get("device") or "cpu").upper()} · {int(_ws.get("elapsed") or 0)}s elapsed</div>', unsafe_allow_html=True)
+    _ws = workload_status()
+    if _ws.get("running"):
+        _wcfg = CLUSTER_NODES.get(_ws.get("node"), {})
+        st.markdown(f'<div class="topalert" style="background:rgba(45,212,191,.08);border-color:rgba(45,212,191,.4);border-left-color:#2DD4BF;color:#8ff0e4;"><span class="rdot" style="background:#2DD4BF;"></span>🔴 REAL WORKLOAD RUNNING — <b>{_ws.get("job")}</b> on {_wcfg.get("display_name","live node")} · {str(_ws.get("device") or "cpu").upper()} · {int(_ws.get("elapsed") or 0)}s elapsed</div>', unsafe_allow_html=True)
 
-avg_risk = risk_df["risk_score"].mean()
-health_pct = max(0, round(100 - avg_risk, 1))
-if health_pct > 70:
-    h_accent, h_trend, h_sub = "#3FCF8E", "up", "Nominal"
-elif health_pct > 40:
-    h_accent, h_trend, h_sub = "#F5B451", "neutral", "Attention"
-else:
-    h_accent, h_trend, h_sub = "#F26D6D", "down", "Action needed"
+    avg_risk = risk_df["risk_score"].mean()
+    health_pct = max(0, round(100 - avg_risk, 1))
+    if health_pct > 70:
+        h_accent, h_trend, h_sub = "#3FCF8E", "up", "Nominal"
+    elif health_pct > 40:
+        h_accent, h_trend, h_sub = "#F5B451", "neutral", "Attention"
+    else:
+        h_accent, h_trend, h_sub = "#F26D6D", "down", "Action needed"
 
-active_jobs = int((data["job_type"] != "Idle").sum())
+    active_jobs = int((data["job_type"] != "Idle").sum())
 
-st.markdown('<div class="kpi-strip">' + "".join([
-    kpi_card("🩺", h_accent, f"{health_pct}%", "Cluster Health", h_sub, h_trend),
-    kpi_card("🚀", "#2DD4BF", f"{active_jobs}/5", "Active AI Jobs", f"{queue_length()} queued", "neutral"),
-    kpi_card("🛡", "#7C6BF5", f'{st.session_state["total_prevented_crashes"]}', "Crashes Prevented", "auto-migrated", "up"),
-    kpi_card("💰", "#F5B451", f"${real_cost_usd_hr:.2f}/hr", "Power Cost · real", f"{real_power_kw:.2f} kW draw", "neutral"),
-    kpi_card("🌱", "#3FCF8E", f"{cost['co2_saved_kg']} kg", "CO₂ Prevented", "vs no mgmt", "up"),
-]) + '</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kpi-strip">' + "".join([
+        kpi_card("🩺", h_accent, f"{health_pct}%", "Cluster Health", h_sub, h_trend),
+        kpi_card("🚀", "#2DD4BF", f"{active_jobs}/5", "Active AI Jobs", f"{queue_length()} queued", "neutral"),
+        kpi_card("🛡", "#7C6BF5", f'{st.session_state["total_prevented_crashes"]}', "Crashes Prevented", "auto-migrated", "up"),
+        kpi_card("💰", "#F5B451", f"${real_cost_usd_hr:.2f}/hr", "Power Cost · real", f"{real_power_kw:.2f} kW draw", "neutral"),
+        kpi_card("🌱", "#3FCF8E", f"{cost['co2_saved_kg']} kg", "CO₂ Prevented", "vs no mgmt", "up"),
+    ]) + '</div>', unsafe_allow_html=True)
 
-# ─── LIVE NODE MONITOR ───────────────────────
-crit = int((data["risk_level"] == "Critical").sum())
-st.markdown(
-    f'<div class="sec"><h3>📡 Live Cluster Monitor</h3>'
-    f'<span class="count">5 workstations</span>'
-    + (f'<span class="count" style="color:#F26D6D;border-color:rgba(242,109,109,.3);">{crit} critical</span>' if crit else '')
-    + '</div>',
-    unsafe_allow_html=True,
-)
-st.markdown('<div class="nodes">' + "".join(node_card(row, live_badge) for _, row in data.iterrows()) + '</div>', unsafe_allow_html=True)
-
-st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-
-# ─── TABS ───────────────────────────────
-tab1, tab2, tab3 = st.tabs(["  🔬  Risk Analysis  ", "  ⚙️  Smart Scheduler  ", "  💰  Cost & Energy  "])
-
-# ── TAB 1 ──
-with tab1:
+    # ─── LIVE NODE MONITOR ───────────────────────
+    crit = int((data["risk_level"] == "Critical").sum())
     st.markdown(
-        '<div class="desc"><b>SensorAI</b> fuses an <code>Isolation Forest</code> (anomaly detection) with a '
-        '<code>Random Forest</code> (failure prediction) trained on GPU telemetry to produce a live risk score per node.</div>',
+        f'<div class="sec"><h3>📡 Live Cluster Monitor</h3>'
+        f'<span class="count">5 workstations</span>'
+        + (f'<span class="count" style="color:#F26D6D;border-color:rgba(242,109,109,.3);">{crit} critical</span>' if crit else '')
+        + '</div>',
         unsafe_allow_html=True,
     )
-    ca, cb = st.columns(2)
-    with ca:
-        order = data.sort_values("risk_score")
-        rc = [LVL[l.lower()][3] for l in order["risk_level"]]
-        f1 = go.Figure(go.Bar(
-            x=order["risk_score"], y=order["display_name"], orientation="h",
-            marker=dict(color=rc), text=[f"{s}%" for s in order["risk_score"]],
-            textposition="outside", textfont=dict(color="#EAEDF4", size=12),
-            hovertemplate="%{y}<br>Risk: %{x}%<extra></extra>",
-        ))
-        f1.update_xaxes(range=[0, 108])
-        st.plotly_chart(brand_fig(f1, 300, "Failure Risk Score by Node"), use_container_width=True)
-    with cb:
-        tc = ["#F26D6D" if t > 87 else "#F5B451" if t > 80 else "#3FCF8E" for t in data["temperature"]]
-        f2 = go.Figure(go.Bar(
-            x=data["display_name"], y=data["temperature"], marker=dict(color=tc),
-            text=[f"{t}°" for t in data["temperature"]], textposition="outside",
-            textfont=dict(color="#EAEDF4", size=12),
-            hovertemplate="%{x}<br>%{y}°C<extra></extra>",
-        ))
-        f2.add_hline(y=80, line_dash="dot", line_color="#F5B451", annotation_text="Warning 80°", annotation_font_color="#F5B451")
-        f2.add_hline(y=87, line_dash="dot", line_color="#F26D6D", annotation_text="Critical 87°", annotation_font_color="#F26D6D")
-        f2.update_yaxes(range=[30, 100])
-        f2.update_xaxes(tickangle=-15)
-        st.plotly_chart(brand_fig(f2, 300, "Thermal Safety Monitor"), use_container_width=True)
+    st.markdown('<div class="nodes">' + "".join(node_card(row, live_badge) for _, row in data.iterrows()) + '</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="card-h">🔍 Explainable AI — Root Cause Breakdown</div>', unsafe_allow_html=True)
-    rows_html = "".join(
-        f'<tr><td>{r["display_name"]}</td><td style="color:var(--muted);text-align:left;font-weight:400;font-family:Inter;">{r["current_job"]}</td>'
-        f'<td style="color:{LVL[("idle" if r["job_type"]=="Idle" else r["risk_level"].lower())][3]};">{r["risk_level"]} · {r["risk_score"]}%</td>'
-        f'<td style="color:var(--muted);text-align:left;font-weight:400;font-family:Inter;">{r["root_cause"]}</td></tr>'
-        for _, r in data.iterrows()
-    )
-    st.markdown(
-        '<table class="etable"><tr>'
-        '<td style="color:var(--faint);font-weight:600;">WORKSTATION</td>'
-        '<td style="color:var(--faint);font-weight:600;text-align:left;">ACTIVE JOB</td>'
-        '<td style="color:var(--faint);font-weight:600;text-align:left;">RISK</td>'
-        '<td style="color:var(--faint);font-weight:600;text-align:left;">ROOT CAUSE</td>'
-        f'</tr>{rows_html}</table>',
-        unsafe_allow_html=True,
-    )
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
-# ── TAB 2 ──
-with tab2:
-    st.markdown(
-        '<div class="desc"><b>SchedulerAI</b> scores every node — '
-        '<code>Score = (1−Risk)×0.5 + FreeVRAM×0.3 + ThermalHeadroom×0.2</code> — '
-        'and places each job on the healthiest node. If a node turns Critical mid-job, the workload auto-migrates.</div>',
-        unsafe_allow_html=True,
-    )
-    mini_grid([
-        ("Jobs in Queue", queue_length(), "#2DD4BF"),
-        ("Auto-Migrations", len(st.session_state["migration_logs"]), "#F5B451"),
-        ("Crashes Prevented", st.session_state["total_prevented_crashes"], "#3FCF8E"),
-    ])
-    cl, cr = st.columns(2)
-    with cl:
-        st.markdown('<div class="card-h">📋 Job Assignment Log</div>', unsafe_allow_html=True)
-        if st.session_state["job_logs"]:
-            st.markdown("".join(f'<div class="log">✅ {x}</div>' for x in st.session_state["job_logs"][:8]), unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="empty">Queue is processing — assignments will appear here.</div>', unsafe_allow_html=True)
-    with cr:
-        st.markdown('<div class="card-h">🚨 Auto-Migration Alerts</div>', unsafe_allow_html=True)
-        if st.session_state["migration_logs"]:
-            st.markdown("".join(f'<div class="alert">🔴 {x}</div>' for x in st.session_state["migration_logs"][:6]), unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="empty" style="color:#3FCF8E;">✅ All nodes within safe thresholds. No migrations needed.</div>', unsafe_allow_html=True)
+    # ─── TABS ───────────────────────────────
+    tab1, tab2, tab3 = st.tabs(["  🔬  Risk Analysis  ", "  ⚙️  Smart Scheduler  ", "  💰  Cost & Energy  "])
 
-    st.markdown('<div class="card-h" style="margin-top:20px;">➕ Assign a Job to a Specific GPU</div>', unsafe_allow_html=True)
-    _lm2 = live_mode_info()
-    _live_ids = list(CLUSTER_NODES)[: _lm2.get("num_live", 0)] if _lm2.get("enabled") else []
-    def _fmt_target(n):
-        if n == "auto":
-            return "🤖 Auto — let AI pick the healthiest GPU"
-        return CLUSTER_NODES[n]["display_name"] + (" · 🛰 LIVE" if n in _live_ids else "")
-    with st.form("assign_job_form", clear_on_submit=True):
-        fa, fb, fc, fd = st.columns([3, 2, 1, 1])
-        job_input = fa.text_input("Job", placeholder="e.g. GPT-4 Bangla Finetune, YOLOv9 Training…", label_visibility="collapsed")
-        target_choice = fb.selectbox("Target GPU", ["auto"] + list(CLUSTER_NODES.keys()), format_func=_fmt_target, label_visibility="collapsed")
-        priority_input = fc.selectbox("Priority", [5, 4, 3, 2, 1], format_func=lambda x: f"P{x}", label_visibility="collapsed")
-        submitted = fd.form_submit_button("⚡ Assign", use_container_width=True)
-        if submitted:
-            if not job_input.strip():
-                st.error("Please enter a job name.")
+    # ── TAB 1 ──
+    with tab1:
+        st.markdown(
+            '<div class="desc"><b>SensorAI</b> fuses an <code>Isolation Forest</code> (anomaly detection) with a '
+            '<code>Random Forest</code> (failure prediction) trained on GPU telemetry to produce a live risk score per node.</div>',
+            unsafe_allow_html=True,
+        )
+        ca, cb = st.columns(2)
+        with ca:
+            order = data.sort_values("risk_score")
+            rc = [LVL[l.lower()][3] for l in order["risk_level"]]
+            f1 = go.Figure(go.Bar(
+                x=order["risk_score"], y=order["display_name"], orientation="h",
+                marker=dict(color=rc), text=[f"{s}%" for s in order["risk_score"]],
+                textposition="outside", textfont=dict(color="#EAEDF4", size=12),
+                hovertemplate="%{y}<br>Risk: %{x}%<extra></extra>",
+            ))
+            f1.update_xaxes(range=[0, 108])
+            st.plotly_chart(brand_fig(f1, 300, "Failure Risk Score by Node"), use_container_width=True)
+        with cb:
+            tc = ["#F26D6D" if t > 87 else "#F5B451" if t > 80 else "#3FCF8E" for t in data["temperature"]]
+            f2 = go.Figure(go.Bar(
+                x=data["display_name"], y=data["temperature"], marker=dict(color=tc),
+                text=[f"{t}°" for t in data["temperature"]], textposition="outside",
+                textfont=dict(color="#EAEDF4", size=12),
+                hovertemplate="%{x}<br>%{y}°C<extra></extra>",
+            ))
+            f2.add_hline(y=80, line_dash="dot", line_color="#F5B451", annotation_text="Warning 80°", annotation_font_color="#F5B451")
+            f2.add_hline(y=87, line_dash="dot", line_color="#F26D6D", annotation_text="Critical 87°", annotation_font_color="#F26D6D")
+            f2.update_yaxes(range=[30, 100])
+            f2.update_xaxes(tickangle=-15)
+            st.plotly_chart(brand_fig(f2, 300, "Thermal Safety Monitor"), use_container_width=True)
+
+        st.markdown('<div class="card-h">🔍 Explainable AI — Root Cause Breakdown</div>', unsafe_allow_html=True)
+        rows_html = "".join(
+            f'<tr><td>{r["display_name"]}</td><td style="color:var(--muted);text-align:left;font-weight:400;font-family:Inter;">{r["current_job"]}</td>'
+            f'<td style="color:{LVL[("idle" if r["job_type"]=="Idle" else r["risk_level"].lower())][3]};">{r["risk_level"]} · {r["risk_score"]}%</td>'
+            f'<td style="color:var(--muted);text-align:left;font-weight:400;font-family:Inter;">{r["root_cause"]}</td></tr>'
+            for _, r in data.iterrows()
+        )
+        st.markdown(
+            '<table class="etable"><tr>'
+            '<td style="color:var(--faint);font-weight:600;">WORKSTATION</td>'
+            '<td style="color:var(--faint);font-weight:600;text-align:left;">ACTIVE JOB</td>'
+            '<td style="color:var(--faint);font-weight:600;text-align:left;">RISK</td>'
+            '<td style="color:var(--faint);font-weight:600;text-align:left;">ROOT CAUSE</td>'
+            f'</tr>{rows_html}</table>',
+            unsafe_allow_html=True,
+        )
+
+    # ── TAB 2 ──
+    with tab2:
+        st.markdown(
+            '<div class="desc"><b>SchedulerAI</b> scores every node — '
+            '<code>Score = (1−Risk)×0.5 + FreeVRAM×0.3 + ThermalHeadroom×0.2</code> — '
+            'and places each job on the healthiest node. If a node turns Critical mid-job, the workload auto-migrates.</div>',
+            unsafe_allow_html=True,
+        )
+        mini_grid([
+            ("Jobs in Queue", queue_length(), "#2DD4BF"),
+            ("Auto-Migrations", len(st.session_state["migration_logs"]), "#F5B451"),
+            ("Crashes Prevented", st.session_state["total_prevented_crashes"], "#3FCF8E"),
+        ])
+        cl, cr = st.columns(2)
+        with cl:
+            st.markdown('<div class="card-h">📋 Job Assignment Log</div>', unsafe_allow_html=True)
+            if st.session_state["job_logs"]:
+                st.markdown("".join(f'<div class="log">✅ {x}</div>' for x in st.session_state["job_logs"][:8]), unsafe_allow_html=True)
             else:
-                job = job_input.strip()
-                if target_choice == "auto":
-                    _cand = data[data["risk_level"] != "Critical"]
-                    target = int(_cand.sort_values(["utilization", "risk_score"]).iloc[0]["node_id"]) if len(_cand) else None
+                st.markdown('<div class="empty">Queue is processing — assignments will appear here.</div>', unsafe_allow_html=True)
+        with cr:
+            st.markdown('<div class="card-h">🚨 Auto-Migration Alerts</div>', unsafe_allow_html=True)
+            if st.session_state["migration_logs"]:
+                st.markdown("".join(f'<div class="alert">🔴 {x}</div>' for x in st.session_state["migration_logs"][:6]), unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="empty" style="color:#3FCF8E;">✅ All nodes within safe thresholds. No migrations needed.</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card-h" style="margin-top:20px;">➕ Assign a Job to a Specific GPU</div>', unsafe_allow_html=True)
+        _lm2 = live_mode_info()
+        _live_ids = list(CLUSTER_NODES)[: _lm2.get("num_live", 0)] if _lm2.get("enabled") else []
+        def _fmt_target(n):
+            if n == "auto":
+                return "🤖 Auto — let AI pick the healthiest GPU"
+            return CLUSTER_NODES[n]["display_name"] + (" · 🛰 LIVE" if n in _live_ids else "")
+        with st.form("assign_job_form", clear_on_submit=True):
+            fa, fb, fc, fd = st.columns([3, 2, 1, 1])
+            job_input = fa.text_input("Job", placeholder="e.g. GPT-4 Bangla Finetune, YOLOv9 Training…", label_visibility="collapsed")
+            target_choice = fb.selectbox("Target GPU", ["auto"] + list(CLUSTER_NODES.keys()), format_func=_fmt_target, label_visibility="collapsed")
+            priority_input = fc.selectbox("Priority", [5, 4, 3, 2, 1], format_func=lambda x: f"P{x}", label_visibility="collapsed")
+            submitted = fd.form_submit_button("⚡ Assign", use_container_width=True)
+            if submitted:
+                if not job_input.strip():
+                    st.error("Please enter a job name.")
                 else:
-                    target = int(target_choice)
-                if target is None:
-                    st.warning("⏳ All nodes are Critical — job held in queue.")
-                else:
-                    _trow = data[data["node_id"] == target].iloc[0]
-                    if _trow["risk_level"] == "Critical" or _trow["utilization"] >= 96:
-                        st.session_state["migration_logs"].insert(0, f'{CLUSTER_NODES[target]["hostname"]} rejected "{job}" — node overloaded.')
-                        st.toast(f"🚨 {CLUSTER_NODES[target]['display_name']} is overloaded", icon="🚨")
-                        st.error(f"❌ {CLUSTER_NODES[target]['display_name']} can't accept more load right now. Pick another GPU or use Auto.")
+                    job = job_input.strip()
+                    if target_choice == "auto":
+                        _cand = data[data["risk_level"] != "Critical"]
+                        target = int(_cand.sort_values(["utilization", "risk_score"]).iloc[0]["node_id"]) if len(_cand) else None
                     else:
-                        assign_job_to_node(target, job, priority_input)
-                        _is_live = target in _live_ids
-                        if _is_live:
-                            start_workload(job, target, priority_input)
-                        _cfg = CLUSTER_NODES.get(target, {})
-                        _tag = " · 🔴 REAL workload started" if _is_live else ""
-                        log_job(job, target, "Manual" if target_choice != "auto" else "AI auto")
-                        st.session_state["job_logs"].insert(0, f'<b>{job}</b> → {_cfg.get("hostname", "Node " + str(target))} | P{priority_input}{_tag}')
-                        st.success(f"✅ {job} → {_cfg.get('display_name', 'Node ' + str(target))}{_tag}")
-                        st.rerun()
+                        target = int(target_choice)
+                    if target is None:
+                        st.warning("⏳ All nodes are Critical — job held in queue.")
+                    else:
+                        _trow = data[data["node_id"] == target].iloc[0]
+                        if _trow["risk_level"] == "Critical" or _trow["utilization"] >= 96:
+                            st.session_state["migration_logs"].insert(0, f'{CLUSTER_NODES[target]["hostname"]} rejected "{job}" — node overloaded.')
+                            st.toast(f"🚨 {CLUSTER_NODES[target]['display_name']} is overloaded", icon="🚨")
+                            st.error(f"❌ {CLUSTER_NODES[target]['display_name']} can't accept more load right now. Pick another GPU or use Auto.")
+                        else:
+                            assign_job_to_node(target, job, priority_input)
+                            _is_live = target in _live_ids
+                            if _is_live:
+                                start_workload(job, target, priority_input)
+                            _cfg = CLUSTER_NODES.get(target, {})
+                            _tag = " · 🔴 REAL workload started" if _is_live else ""
+                            log_job(job, target, "Manual" if target_choice != "auto" else "AI auto")
+                            st.session_state["job_logs"].insert(0, f'<b>{job}</b> → {_cfg.get("hostname", "Node " + str(target))} | P{priority_input}{_tag}')
+                            st.success(f"✅ {job} → {_cfg.get('display_name', 'Node ' + str(target))}{_tag}")
+                            st.rerun()
 
-    _bc1, _bc2 = st.columns(2)
-    if _bc1.button("⏹ Stop live workload", use_container_width=True):
-        stop_workload(); st.toast("Live workload stopped."); st.rerun()
-    if _bc2.button("🧹 Clear all assignments", use_container_width=True):
-        clear_all_node_jobs(); stop_workload(); st.rerun()
+        _bc1, _bc2 = st.columns(2)
+        if _bc1.button("⏹ Stop live workload", use_container_width=True):
+            stop_workload(); st.toast("Live workload stopped."); st.rerun()
+        if _bc2.button("🧹 Clear all assignments", use_container_width=True):
+            clear_all_node_jobs(); stop_workload(); st.rerun()
 
-# ── TAB 3 ──
-with tab3:
-    idle_nodes = get_idle_nodes()
-    idle_count = len(idle_nodes)
-    active_count = 5 - idle_count
-    mini_grid([
-        ("Active Workstations", f"{active_count}/5", "#3FCF8E"),
-        ("Idle Machines", idle_count, "#F5B451" if idle_count else "#3FCF8E"),
-        ("Power Cost/hr · real", f"${real_cost_usd_hr:.2f}", "#2DD4BF"),
-        ("Monthly Waste", f"${cost['monthly_waste']:.0f}" if cost["monthly_waste"] > 0 else "$0", "#F26D6D" if cost["monthly_waste"] > 0 else "#3FCF8E"),
-    ])
+    # ── TAB 3 ──
+    with tab3:
+        idle_nodes = get_idle_nodes()
+        idle_count = len(idle_nodes)
+        active_count = 5 - idle_count
+        mini_grid([
+            ("Active Workstations", f"{active_count}/5", "#3FCF8E"),
+            ("Idle Machines", idle_count, "#F5B451" if idle_count else "#3FCF8E"),
+            ("Power Cost/hr · real", f"${real_cost_usd_hr:.2f}", "#2DD4BF"),
+            ("Monthly Waste", f"${cost['monthly_waste']:.0f}" if cost["monthly_waste"] > 0 else "$0", "#F26D6D" if cost["monthly_waste"] > 0 else "#3FCF8E"),
+        ])
 
-    st.markdown(f"""
+        st.markdown(f"""
     <div class="banner">
       <div class="lbl">💰 Total Savings This Session ({session_mins} min)</div>
       <div class="big">${cost['total_savings']:.2f} USD</div>
@@ -550,23 +564,23 @@ with tab3:
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-    cp, ce = st.columns(2)
-    with cp:
-        pie = go.Figure(go.Pie(
-            labels=["Running AI Jobs", "Idle / Unallocated"],
-            values=[max(active_count, 0.001), max(idle_count, 0.001)],
-            hole=0.62, marker=dict(colors=["#3FCF8E", "#7C6BF5"], line=dict(color="#0A0C12", width=3)),
-            textfont=dict(color="#EAEDF4", size=13), sort=False,
-        ))
-        pie.update_layout(showlegend=True, legend=dict(orientation="h", y=-0.1))
-        st.plotly_chart(brand_fig(pie, 300, "Cluster Allocation"), use_container_width=True)
-    with ce:
-        st.markdown('<div class="card-h">⚡ Electricity & Carbon Impact</div>', unsafe_allow_html=True)
-        total_kw = real_power_kw
-        daily_kwh = total_kw * 24
-        live_row = (f'<tr><td>🔴 Live measured (real HW)</td><td style="color:#2DD4BF;">{live_power_w:.0f} W</td></tr>' if live_power_w > 0 else '')
-        st.markdown(f"""
+        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+        cp, ce = st.columns(2)
+        with cp:
+            pie = go.Figure(go.Pie(
+                labels=["Running AI Jobs", "Idle / Unallocated"],
+                values=[max(active_count, 0.001), max(idle_count, 0.001)],
+                hole=0.62, marker=dict(colors=["#3FCF8E", "#7C6BF5"], line=dict(color="#0A0C12", width=3)),
+                textfont=dict(color="#EAEDF4", size=13), sort=False,
+            ))
+            pie.update_layout(showlegend=True, legend=dict(orientation="h", y=-0.1))
+            st.plotly_chart(brand_fig(pie, 300, "Cluster Allocation"), use_container_width=True)
+        with ce:
+            st.markdown('<div class="card-h">⚡ Electricity & Carbon Impact</div>', unsafe_allow_html=True)
+            total_kw = real_power_kw
+            daily_kwh = total_kw * 24
+            live_row = (f'<tr><td>🔴 Live measured (real HW)</td><td style="color:#2DD4BF;">{live_power_w:.0f} W</td></tr>' if live_power_w > 0 else '')
+            st.markdown(f"""
         <table class="etable">
           <tr><td>Total Power Draw (real+sim)</td><td>{total_kw:.2f} kW</td></tr>
           {live_row}
@@ -577,7 +591,5 @@ with tab3:
         </table>
         """, unsafe_allow_html=True)
 
-# ─── AUTO-REFRESH ───────────────────────────
-if not paused:
-    time.sleep(refresh_rate)
-    st.rerun()
+
+live_view()
