@@ -14,12 +14,17 @@ import plotly.graph_objects as go
 from data_simulator import (
     generate_metrics, trigger_chaos, clear_all_chaos, reset_history,
     set_live_mode, live_mode_info,
+    assign_job_to_node, clear_node_job, clear_all_node_jobs, get_node_jobs,
 )
+from workload_runner import start_workload, stop_workload, workload_status
 from sensor_ai import predict_risk, load_models
 from scheduler_ai import add_job, assign_job, queue_length, check_migration
 from cost_ai import get_cost_summary, get_idle_nodes, start_scanner
 from database import init_db, insert_metrics, insert_prediction, log_job
-from cluster_config import CLUSTER_NODES, CO2_PER_KWH_KG
+from cluster_config import (
+    CLUSTER_NODES, CO2_PER_KWH_KG,
+    ELECTRICITY_PER_KWH_BDT, COST_PER_GPU_PER_HOUR_USD, COST_PER_GPU_PER_HOUR_BDT,
+)
 
 # ─── PAGE CONFIG ─────────────────────────────────────────
 st.set_page_config(
@@ -140,6 +145,9 @@ html, body, [class*="css"]{font-family:'Inter',sans-serif; color:var(--text);}
 .banner .note{font-size:.72rem; color:var(--faint); margin-top:8px; line-height:1.5;}
 .desc{font-size:.8rem; color:var(--muted); line-height:1.55; margin-bottom:16px;}
 .desc code{background:var(--raised); color:var(--cyan); padding:2px 7px; border-radius:6px; font-size:.76rem;}
+
+.topalert{display:flex;align-items:center;gap:10px;background:rgba(242,109,109,.1);border:1px solid rgba(242,109,109,.35);border-left:4px solid var(--red);border-radius:12px;padding:12px 18px;margin-bottom:16px;color:#ffbcbc;font-size:.82rem;font-weight:600;}
+.topalert .rdot{width:9px;height:9px;border-radius:50%;background:var(--red);}
 
 /* Energy table */
 .etable{width:100%; border-collapse:collapse; font-size:.79rem;}
@@ -316,6 +324,13 @@ for m in check_migration(metrics_df, risk_df):
 
 cost = get_cost_summary()
 
+# Real energy from measured power draw (live node reports real watts)
+real_power_kw = float(data["power_draw"].sum()) / 1000.0
+live_power_w = float(data[data["data_source"] == "live"]["power_draw"].sum())
+_bdt_per_usd = COST_PER_GPU_PER_HOUR_BDT / COST_PER_GPU_PER_HOUR_USD
+elec_usd_kwh = ELECTRICITY_PER_KWH_BDT / _bdt_per_usd
+real_cost_usd_hr = real_power_kw * elec_usd_kwh
+
 # Live-mode presentation values
 _lm = live_mode_info()
 live_badge = ("🛰 LIVE HW" if _lm["is_real_gpu"] else "🛰 LIVE · SYS") if _lm["enabled"] else ""
@@ -337,6 +352,22 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ─── KPI STRIP ───────────────────────────
+# Overload & live-workload notifications
+_overloaded = data[(data["risk_level"] == "Critical") | (data["utilization"] >= 96)]
+if len(_overloaded):
+    _names = ", ".join(_overloaded["display_name"].tolist())
+    st.markdown(f'<div class="topalert"><span class="rdot"></span>⚠ OVERLOAD — {_names} cannot accept more load (Critical / GPU maxed). SchedulerAI is rerouting workloads.</div>', unsafe_allow_html=True)
+    if st.session_state.get("_ovl") != _names:
+        st.toast(f"🚨 Overload: {_names}", icon="🚨")
+        st.session_state["_ovl"] = _names
+else:
+    st.session_state["_ovl"] = ""
+
+_ws = workload_status()
+if _ws.get("running"):
+    _wcfg = CLUSTER_NODES.get(_ws.get("node"), {})
+    st.markdown(f'<div class="topalert" style="background:rgba(45,212,191,.08);border-color:rgba(45,212,191,.4);border-left-color:#2DD4BF;color:#8ff0e4;"><span class="rdot" style="background:#2DD4BF;"></span>🔴 REAL WORKLOAD RUNNING — <b>{_ws.get("job")}</b> on {_wcfg.get("display_name","live node")} · {str(_ws.get("device") or "cpu").upper()} · {int(_ws.get("elapsed") or 0)}s elapsed</div>', unsafe_allow_html=True)
+
 avg_risk = risk_df["risk_score"].mean()
 health_pct = max(0, round(100 - avg_risk, 1))
 if health_pct > 70:
@@ -352,7 +383,7 @@ st.markdown('<div class="kpi-strip">' + "".join([
     kpi_card("🩺", h_accent, f"{health_pct}%", "Cluster Health", h_sub, h_trend),
     kpi_card("🚀", "#2DD4BF", f"{active_jobs}/5", "Active AI Jobs", f"{queue_length()} queued", "neutral"),
     kpi_card("🛡", "#7C6BF5", f'{st.session_state["total_prevented_crashes"]}', "Crashes Prevented", "auto-migrated", "up"),
-    kpi_card("💰", "#F5B451", f"${cost['hourly_cost']:.0f}/hr", "Running Cost", f"{cost['active_gpus']} active", "neutral"),
+    kpi_card("💰", "#F5B451", f"${real_cost_usd_hr:.2f}/hr", "Power Cost · real", f"{real_power_kw:.2f} kW draw", "neutral"),
     kpi_card("🌱", "#3FCF8E", f"{cost['co2_saved_kg']} kg", "CO₂ Prevented", "vs no mgmt", "up"),
 ]) + '</div>', unsafe_allow_html=True)
 
@@ -449,25 +480,54 @@ with tab2:
         else:
             st.markdown('<div class="empty" style="color:#3FCF8E;">✅ All nodes within safe thresholds. No migrations needed.</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="card-h" style="margin-top:20px;">➕ Assign a New Job</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card-h" style="margin-top:20px;">➕ Assign a Job to a Specific GPU</div>', unsafe_allow_html=True)
+    _lm2 = live_mode_info()
+    _live_ids = list(CLUSTER_NODES)[: _lm2.get("num_live", 0)] if _lm2.get("enabled") else []
+    def _fmt_target(n):
+        if n == "auto":
+            return "🤖 Auto — let AI pick the healthiest GPU"
+        return CLUSTER_NODES[n]["display_name"] + (" · 🛰 LIVE" if n in _live_ids else "")
     with st.form("assign_job_form", clear_on_submit=True):
-        fa, fb, fc = st.columns([3, 1, 1])
+        fa, fb, fc, fd = st.columns([3, 2, 1, 1])
         job_input = fa.text_input("Job", placeholder="e.g. GPT-4 Bangla Finetune, YOLOv9 Training…", label_visibility="collapsed")
-        priority_input = fb.selectbox("Priority", [5, 4, 3, 2, 1], format_func=lambda x: f"Priority {x}", label_visibility="collapsed")
-        submitted = fc.form_submit_button("⚡ Assign", use_container_width=True)
+        target_choice = fb.selectbox("Target GPU", ["auto"] + list(CLUSTER_NODES.keys()), format_func=_fmt_target, label_visibility="collapsed")
+        priority_input = fc.selectbox("Priority", [5, 4, 3, 2, 1], format_func=lambda x: f"P{x}", label_visibility="collapsed")
+        submitted = fd.form_submit_button("⚡ Assign", use_container_width=True)
         if submitted:
-            if job_input.strip():
-                add_job(job_input.strip(), priority=priority_input)
-                jn, bn, rs = assign_job(metrics_df, risk_df)
-                if jn and bn:
-                    log_job(jn, bn, rs)
-                    cfg = CLUSTER_NODES.get(bn, {})
-                    st.session_state["job_logs"].insert(0, f'<b>{jn}</b> → {cfg.get("hostname", "Node " + str(bn))} | {rs}')
-                    st.success(f"✅ {jn} assigned to {cfg.get('display_name', 'Node ' + str(bn))}")
-                else:
-                    st.warning("⏳ Job queued — all nodes currently busy or critical.")
-            else:
+            if not job_input.strip():
                 st.error("Please enter a job name.")
+            else:
+                job = job_input.strip()
+                if target_choice == "auto":
+                    _cand = data[data["risk_level"] != "Critical"]
+                    target = int(_cand.sort_values(["utilization", "risk_score"]).iloc[0]["node_id"]) if len(_cand) else None
+                else:
+                    target = int(target_choice)
+                if target is None:
+                    st.warning("⏳ All nodes are Critical — job held in queue.")
+                else:
+                    _trow = data[data["node_id"] == target].iloc[0]
+                    if _trow["risk_level"] == "Critical" or _trow["utilization"] >= 96:
+                        st.session_state["migration_logs"].insert(0, f'{CLUSTER_NODES[target]["hostname"]} rejected "{job}" — node overloaded.')
+                        st.toast(f"🚨 {CLUSTER_NODES[target]['display_name']} is overloaded", icon="🚨")
+                        st.error(f"❌ {CLUSTER_NODES[target]['display_name']} can't accept more load right now. Pick another GPU or use Auto.")
+                    else:
+                        assign_job_to_node(target, job, priority_input)
+                        _is_live = target in _live_ids
+                        if _is_live:
+                            start_workload(job, target, priority_input)
+                        _cfg = CLUSTER_NODES.get(target, {})
+                        _tag = " · 🔴 REAL workload started" if _is_live else ""
+                        log_job(job, target, "Manual" if target_choice != "auto" else "AI auto")
+                        st.session_state["job_logs"].insert(0, f'<b>{job}</b> → {_cfg.get("hostname", "Node " + str(target))} | P{priority_input}{_tag}')
+                        st.success(f"✅ {job} → {_cfg.get('display_name', 'Node ' + str(target))}{_tag}")
+                        st.rerun()
+
+    _bc1, _bc2 = st.columns(2)
+    if _bc1.button("⏹ Stop live workload", use_container_width=True):
+        stop_workload(); st.toast("Live workload stopped."); st.rerun()
+    if _bc2.button("🧹 Clear all assignments", use_container_width=True):
+        clear_all_node_jobs(); stop_workload(); st.rerun()
 
 # ── TAB 3 ──
 with tab3:
@@ -477,7 +537,7 @@ with tab3:
     mini_grid([
         ("Active Workstations", f"{active_count}/5", "#3FCF8E"),
         ("Idle Machines", idle_count, "#F5B451" if idle_count else "#3FCF8E"),
-        ("Hourly Cost", f"${cost['hourly_cost']:.2f}", "#2DD4BF"),
+        ("Power Cost/hr · real", f"${real_cost_usd_hr:.2f}", "#2DD4BF"),
         ("Monthly Waste", f"${cost['monthly_waste']:.0f}" if cost["monthly_waste"] > 0 else "$0", "#F26D6D" if cost["monthly_waste"] > 0 else "#3FCF8E"),
     ])
 
@@ -503,11 +563,14 @@ with tab3:
         st.plotly_chart(brand_fig(pie, 300, "Cluster Allocation"), use_container_width=True)
     with ce:
         st.markdown('<div class="card-h">⚡ Electricity & Carbon Impact</div>', unsafe_allow_html=True)
-        total_kw = data["power_draw"].sum() / 1000
+        total_kw = real_power_kw
         daily_kwh = total_kw * 24
+        live_row = (f'<tr><td>🔴 Live measured (real HW)</td><td style="color:#2DD4BF;">{live_power_w:.0f} W</td></tr>' if live_power_w > 0 else '')
         st.markdown(f"""
         <table class="etable">
-          <tr><td>Total Power Draw</td><td>{total_kw:.2f} kW</td></tr>
+          <tr><td>Total Power Draw (real+sim)</td><td>{total_kw:.2f} kW</td></tr>
+          {live_row}
+          <tr><td>Electricity Cost / hr</td><td>${real_cost_usd_hr:.2f}</td></tr>
           <tr><td>Daily Energy Usage</td><td>{daily_kwh:.1f} kWh</td></tr>
           <tr><td>CO₂ (today est.)</td><td>{daily_kwh * CO2_PER_KWH_KG:.1f} kg</td></tr>
           <tr><td>CO₂ Prevented (idle mgmt)</td><td style="color:#3FCF8E;">{cost['co2_saved_kg']} kg</td></tr>
