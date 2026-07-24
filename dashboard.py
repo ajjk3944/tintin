@@ -32,7 +32,7 @@ from cluster_config import (
 st.set_page_config(
     page_title="TensorTitan · Cluster Console",
     layout="wide",
-    page_icon="🧠",
+    page_icon="assets/logo.png",
     initial_sidebar_state="collapsed",
 )
 
