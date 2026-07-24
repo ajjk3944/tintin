@@ -1,0 +1,10 @@
+numpy
+pandas
+scikit-learn
+streamlit
+plotly
+joblib
+psutil
+GPUtil
+py3nvml
+wmi
