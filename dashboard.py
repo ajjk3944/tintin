@@ -693,7 +693,9 @@ The job is assigned to the node with the **highest score**. If a node turns Crit
                     name=""  # Empty name to prevent "undefined" from showing
                 ))
                 _lf.update_yaxes(range=[0, 105], ticksuffix="%", title="Helpful Decisions (%)")
-                _lf.update_xaxes(title="Cycle", dtick=1)
+                # X-axis: show every 5th cycle to avoid crowding, or adapt based on data range
+                _tick_interval = max(1, len(_xs) // 8) if len(_xs) > 10 else 1
+                _lf.update_xaxes(title="Cycle", dtick=_tick_interval, tickangle=0)
                 _lf.update_layout(showlegend=False)  # Hide legend completely
                 st.plotly_chart(brand_fig(_lf, 300, ""), use_container_width=True)
             else:
