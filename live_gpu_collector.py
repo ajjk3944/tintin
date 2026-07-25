@@ -165,8 +165,22 @@ class LiveGPUCollector:
                 gpu_temp = min(75, max(45, 50 + gpu_util * 0.3))
             
             # Memory usage (Intel integrated shares system RAM)
-            # Estimate based on system memory usage
-            total_gpu_mem = 8.0  # Typical shared memory for integrated GPU (GB)
+            # Get actual adapter RAM from WMI or use system memory as fallback
+            total_gpu_mem = 8.0  # Default fallback
+            adapter_ram = gpu_info.get('adapter_ram', 0)
+            if adapter_ram > 0:
+                # AdapterRAM is in bytes, convert to GB
+                total_gpu_mem = round(adapter_ram / (1024**3), 1)
+            else:
+                # For integrated GPUs, use a portion of total system RAM
+                total_system_ram = psutil.virtual_memory().total / (1024**3)
+                # Integrated GPUs typically can access up to 50% of system RAM
+                total_gpu_mem = round(total_system_ram * 0.5, 1)
+            
+            # Cap at reasonable limits for display
+            total_gpu_mem = max(2.0, min(64.0, total_gpu_mem))
+            
+            # Memory usage estimation based on system memory usage
             gpu_mem_used = (mem_load / 100.0) * total_gpu_mem * 0.6  # Use ~60% correlation
             
             # Power estimation (Intel integrated GPUs: 15-28W typical)
