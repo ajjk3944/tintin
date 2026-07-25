@@ -21,6 +21,7 @@ from data_simulator import (
     assign_job_to_node, clear_node_job, clear_all_node_jobs, get_node_jobs,
 )
 from workload_runner import start_workload, stop_workload, workload_status
+import loop_proof
 from sensor_ai import predict_risk, load_models
 from scheduler_ai import add_job, assign_job, queue_length, check_migration
 from cost_ai import get_cost_summary, get_idle_nodes, start_scanner
@@ -203,6 +204,7 @@ if "initialized" not in st.session_state:
         ("ViT-B/16 Medical Imaging", 3),
     ]:
         add_job(name, priority=pri)
+    loop_proof.reset()
     st.session_state["initialized"] = True
 
 st.session_state.setdefault("job_logs", [])
@@ -364,6 +366,10 @@ def live_view():
 
     cost = get_cost_summary()
 
+    # LoopProof: advance the learning loop one cycle (scores previous
+    # outcomes, records new decisions, detects & resolves module conflicts)
+    loop_proof.run_cycle(metrics_df, risk_df, get_idle_nodes(), best_node, get_node_jobs())
+
     # Real energy from measured power draw (live node reports real watts)
     real_power_kw = float(data["power_draw"].sum()) / 1000.0
     live_power_w = float(data[data["data_source"] == "live"]["power_draw"].sum())
@@ -441,7 +447,7 @@ def live_view():
     st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
     # ─── TABS ───────────────────────────────
-    VIEWS = ["🔬 Risk Analysis", "⚙️ Smart Scheduler", "💰 Cost & Energy"]
+    VIEWS = ["🔬 Risk Analysis", "⚙️ Smart Scheduler", "💰 Cost & Energy", "🔁 Loop Proof"]
     view = st.radio("view", VIEWS, horizontal=True,
                      label_visibility="collapsed", key="active_view")
 
@@ -650,6 +656,79 @@ The job is assigned to the node with the **highest score**. If a node turns Crit
           <tr><td>CO₂ Prevented (idle mgmt)</td><td style="color:#3FCF8E;">{cost['co2_saved_kg']} kg</td></tr>
         </table>
         """, unsafe_allow_html=True)
+
+
+    # ── LOOP PROOF PANEL ──
+    if view == VIEWS[3]:
+        st.markdown(
+            '<div class="desc"><b>Loop Proof Panel</b> sits on top of SensorAI + SchedulerAI + CostAI. '
+            'It records every module decision with its measured outcome, proves the loop learns via a rising '
+            '<code>helpful-decision</code> curve, and resolves conflicts (e.g. CostAI wants to fill an idle GPU that '
+            'SchedulerAI wants to keep free) using a clear <code>Safety &gt; Cost</code> rule. No model training — '
+            'the loop adapts a real safety margin from its own past outcomes.</div>',
+            unsafe_allow_html=True,
+        )
+        _lp = loop_proof.summary()
+        _tr = _lp["trend"]
+        mini_grid([
+            ("Loop Cycles", _lp["cycles"], "#2DD4BF"),
+            ("Helpful Decisions", f'{_lp["helpful_pct"]}%', "#3FCF8E"),
+            ("Conflicts Resolved", _lp["conflicts_resolved"], "#F5B451"),
+            ("Learning Trend", f'{"+" if _tr >= 0 else ""}{_tr}%', "#7C6BF5"),
+        ])
+
+        _cL, _cR = st.columns([3, 2])
+        with _cL:
+            st.markdown('<div class="card-h">📈 Learning Curve — share of helpful decisions per cycle</div>', unsafe_allow_html=True)
+            _curve = loop_proof.learning_curve()
+            if len(_curve) >= 2:
+                _xs = [c["cycle"] for c in _curve]
+                _ys = [c["helpful_pct"] for c in _curve]
+                _lf = go.Figure(go.Scatter(
+                    x=_xs, y=_ys, mode="lines+markers",
+                    line=dict(color="#3FCF8E", width=3, shape="spline"),
+                    marker=dict(size=7, color="#3FCF8E"),
+                    fill="tozeroy", fillcolor="rgba(63,207,142,.12)",
+                    hovertemplate="Cycle %{x}<br>Helpful: %{y}%<extra></extra>",
+                    name=""  # Empty name to prevent "undefined" from showing
+                ))
+                _lf.update_yaxes(range=[0, 105], ticksuffix="%", title="")
+                _lf.update_xaxes(title="Cycle", dtick=1)
+                _lf.update_layout(showlegend=False)  # Hide legend completely
+                st.plotly_chart(brand_fig(_lf, 300, ""), use_container_width=True)
+            else:
+                st.markdown('<div class="empty">Collecting decisions… the curve appears after a few refresh cycles.</div>', unsafe_allow_html=True)
+
+            if st.button("⚔️ Force a live conflict (demo)", use_container_width=True):
+                loop_proof.force_conflict()
+                st.toast("Conflict staged — watch it resolve on the next refresh.")
+                st.rerun()
+
+            st.markdown('<div class="card-h" style="margin-top:14px;">⚔️ Conflict Resolution Log</div>', unsafe_allow_html=True)
+            _cf = loop_proof.conflict_log(6)
+            if _cf:
+                st.markdown("".join(
+                    f'<div class="alert" style="border-left-color:#F5B451;color:#ffe0b0;background:rgba(245,180,81,.07);">'
+                    f'⚔️ <b>Node {c["node_id"]}</b> (risk {c["risk"]}) — {c["modules"]} → '
+                    f'<b>{c["winner"]}</b>: {c["action"]}<br><span style="color:#8B93A7;font-family:Inter;">{c["reason"]}</span></div>'
+                    for c in _cf
+                ), unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="empty">No conflicts yet. Click “Force a live conflict” to demo the rule.</div>', unsafe_allow_html=True)
+
+        with _cR:
+            st.markdown('<div class="card-h">📋 Decision Record</div>', unsafe_allow_html=True)
+            _oc = {"helpful": "#3FCF8E", "harmful": "#F26D6D", "neutral": "#8B93A7", "pending": "#5A6274"}
+            _dec = loop_proof.recent_decisions(12)
+            if _dec:
+                st.markdown("".join(
+                    f'<div class="log" style="border-left-color:{_oc.get(d["outcome"], "#8B93A7")};">'
+                    f'<b>{d["module"]}</b> · {d["action"]} '
+                    f'<span style="color:{_oc.get(d["outcome"], "#8B93A7")};font-weight:700;">[{d["outcome"].upper()}]</span></div>'
+                    for d in _dec
+                ), unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="empty">Decisions will appear here as the loop runs.</div>', unsafe_allow_html=True)
 
 
 live_view()
