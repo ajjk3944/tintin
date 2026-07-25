@@ -7,6 +7,8 @@ Station #1 can mirror THIS machine's real hardware telemetry (live mode).
 """
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
+DHAKA = ZoneInfo("Asia/Dhaka")
 import base64
 from pathlib import Path
 
@@ -161,6 +163,30 @@ html, body, [class*="css"]{font-family:'Inter',sans-serif; color:var(--text);}
 [data-testid="stSidebar"]{background:var(--surface); border-right:1px solid var(--line);}
 [data-testid="stSidebar"] .stButton button{border-radius:9px; border:1px solid var(--line); background:var(--surface2); color:var(--text); font-size:.78rem; font-weight:600;}
 [data-testid="stSidebar"] .stButton button:hover{border-color:var(--accent); color:#fff;}
+
+/* ── Responsive ── */
+@media (max-width:1100px){
+  .kpi-strip{grid-template-columns:repeat(2,1fr)!important;}
+  .nodes{grid-template-columns:repeat(2,1fr)!important;}
+}
+@media (max-width:640px){
+  .kpi-strip{grid-template-columns:1fr!important;}
+  .nodes{grid-template-columns:1fr!important;}
+  .top{flex-direction:column; align-items:flex-start; gap:12px;}
+  .top-right{width:100%; justify-content:space-between;}
+  .clock{text-align:left;}
+  .block-container{padding-left:.7rem!important; padding-right:.7rem!important;}
+  .kpi-val{font-size:1.4rem;}
+}
+
+/* radio view-switcher-কে ট্যাবের মতো দেখানো */
+div[role="radiogroup"]{gap:6px; background:var(--surface); padding:6px; border-radius:13px;
+  border:1px solid var(--line); display:inline-flex; margin-bottom:14px;}
+div[role="radiogroup"] label{margin:0!important; padding:8px 18px; border-radius:9px; cursor:pointer;
+  color:var(--muted); font-weight:600; font-size:.84rem;}
+div[role="radiogroup"] label:hover{color:var(--text);}
+div[role="radiogroup"] label input{display:none;}
+div[role="radiogroup"] label:has(input:checked){background:var(--raised); color:var(--text);}
 </style>
 """, unsafe_allow_html=True)
 
@@ -351,12 +377,12 @@ def live_view():
     live_label = "LIVE HW · 5 NODES" if (_lm["enabled"] and _lm["is_real_gpu"]) else "LIVE · 5 NODES"
 
     # ─── HEADER ──────────────────────────────
-    now = datetime.now()
+    now = datetime.now(DHAKA)
     st.markdown(f"""
 <div class="top">
   <div class="brand">
     <img src="data:image/png;base64,{{logo_base64}}" class="logo-img" style="width:50px;height:50px;border-radius:12px;"/>
-    <div><h1>TensorTitan</h1><p>GPU Cluster Intelligence Console · DIU CSE AI Research Lab</p></div>
+    <div><h1>TensorTitan</h1><p>see the cluster. Predict the failure. Save the cost.</p></div>
   </div>
   <div class="top-right">
     <div class="clock">{now.strftime('%H:%M:%S')}<span>{now.strftime('%A, %d %B %Y')}</span></div>
@@ -415,10 +441,12 @@ def live_view():
     st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
     # ─── TABS ───────────────────────────────
-    tab1, tab2, tab3 = st.tabs(["  🔬  Risk Analysis  ", "  ⚙️  Smart Scheduler  ", "  💰  Cost & Energy  "])
+    VIEWS = ["🔬 Risk Analysis", "⚙️ Smart Scheduler", "💰 Cost & Energy"]
+    view = st.radio("view", VIEWS, horizontal=True,
+                     label_visibility="collapsed", key="active_view")
 
     # ── TAB 1 ──
-    with tab1:
+    if view == VIEWS[0]:
         st.markdown(
             '<div class="desc"><b>SensorAI</b> fuses an <code>Isolation Forest</code> (anomaly detection) with a '
             '<code>Random Forest</code> (failure prediction) trained on GPU telemetry to produce a live risk score per node.</div>',
@@ -468,13 +496,26 @@ def live_view():
         )
 
     # ── TAB 2 ──
-    with tab2:
+    if view == VIEWS[1]:
         st.markdown(
-            '<div class="desc"><b>SchedulerAI</b> scores every node — '
-            '<code>Score = (1−Risk)×0.5 + FreeVRAM×0.3 + ThermalHeadroom×0.2</code> — '
-            'and places each job on the healthiest node. If a node turns Critical mid-job, the workload auto-migrates.</div>',
+            '<div class="desc"><b>SchedulerAI</b> intelligently assigns jobs to the healthiest GPU nodes and auto-migrates workloads when a node becomes critical.</div>',
             unsafe_allow_html=True,
         )
+        with st.expander("ℹ️ How does the scoring algorithm work?"):
+            st.markdown("""
+**Node Scoring Formula:**
+```
+Score = (1 − Risk) × 0.5 + FreeVRAM × 0.3 + ThermalHeadroom × 0.2
+```
+
+**Weights explained:**
+- **50%** — Health & Stability (inverse of risk score)
+- **30%** — Available VRAM (memory capacity)
+- **20%** — Thermal headroom (temperature safety margin)
+
+The job is assigned to the node with the **highest score**. If a node turns Critical mid-job, the workload automatically migrates to the next healthiest node.
+            """)
+
         mini_grid([
             ("Jobs in Queue", queue_length(), "#2DD4BF"),
             ("Auto-Migrations", len(st.session_state["migration_logs"]), "#F5B451"),
@@ -484,23 +525,26 @@ def live_view():
         with cl:
             st.markdown('<div class="card-h">📋 Job Assignment Log</div>', unsafe_allow_html=True)
             if st.session_state["job_logs"]:
-                st.markdown("".join(f'<div class="log">✅ {x}</div>' for x in st.session_state["job_logs"][:8]), unsafe_allow_html=True)
+                st.markdown("".join(f'<div class="log">✅ {x}</div>' for x in reversed(st.session_state["job_logs"][:8])), unsafe_allow_html=True)
             else:
                 st.markdown('<div class="empty">Queue is processing — assignments will appear here.</div>', unsafe_allow_html=True)
         with cr:
             st.markdown('<div class="card-h">🚨 Auto-Migration Alerts</div>', unsafe_allow_html=True)
             if st.session_state["migration_logs"]:
-                st.markdown("".join(f'<div class="alert">🔴 {x}</div>' for x in st.session_state["migration_logs"][:6]), unsafe_allow_html=True)
+                st.markdown("".join(f'<div class="alert">🔴 {x}</div>' for x in reversed(st.session_state["migration_logs"][:6])), unsafe_allow_html=True)
             else:
                 st.markdown('<div class="empty" style="color:#3FCF8E;">✅ All nodes within safe thresholds. No migrations needed.</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="card-h" style="margin-top:20px;">➕ Assign a Job to a Specific GPU</div>', unsafe_allow_html=True)
         _lm2 = live_mode_info()
         _live_ids = list(CLUSTER_NODES)[: _lm2.get("num_live", 0)] if _lm2.get("enabled") else []
+        # আসল/live নাম live data থেকে নাও, static config থেকে না
+        _name_by_id = dict(zip(data["node_id"], data["display_name"]))
         def _fmt_target(n):
             if n == "auto":
                 return "🤖 Auto — let AI pick the healthiest GPU"
-            return CLUSTER_NODES[n]["display_name"] + (" · 🛰 LIVE" if n in _live_ids else "")
+            nm = _name_by_id.get(n, CLUSTER_NODES[n]["display_name"])
+            return nm + (" · 🛰 LIVE" if n in _live_ids else "")
         with st.form("assign_job_form", clear_on_submit=True):
             fa, fb, fc, fd = st.columns([3, 2, 1, 1])
             job_input = fa.text_input("Job", placeholder="e.g. GPT-4 Bangla Finetune, YOLOv9 Training…", label_visibility="collapsed")
@@ -534,17 +578,33 @@ def live_view():
                             _tag = " · 🔴 REAL workload started" if _is_live else ""
                             log_job(job, target, "Manual" if target_choice != "auto" else "AI auto")
                             st.session_state["job_logs"].insert(0, f'<b>{job}</b> → {_cfg.get("hostname", "Node " + str(target))} | P{priority_input}{_tag}')
-                            st.success(f"✅ {job} → {_cfg.get('display_name', 'Node ' + str(target))}{_tag}")
+                            st.success(f"✅ {job} → {_name_by_id.get(target, 'Node ' + str(target))}{_tag}")
                             st.rerun()
 
-        _bc1, _bc2 = st.columns(2)
-        if _bc1.button("⏹ Stop live workload", use_container_width=True):
-            stop_workload(); st.toast("Live workload stopped."); st.rerun()
-        if _bc2.button("🧹 Clear all assignments", use_container_width=True):
+        _ws_now = workload_status()
+        _bc1, _bc2, _bc3 = st.columns(3)
+        # ▶ START — প্রথম live GPU-তে আসল workload চালু করে
+        if _bc1.button("▶ Start workload", use_container_width=True,
+                       disabled=(_ws_now.get("running") or not _live_ids)):
+            _lnode = _live_ids[0]
+            _jobname = "Manual Live Benchmark"
+            assign_job_to_node(_lnode, _jobname, 3)
+            start_workload(_jobname, _lnode, 3)
+            st.toast("▶ Live workload started."); st.rerun()
+        # ⏹ STOP — workload থামায় + node-টাও clear করে যাতে দৃশ্যমানভাবে থামে
+        if _bc2.button("⏹ Stop workload", use_container_width=True,
+                       disabled=not _ws_now.get("running")):
+            stop_workload()
+            _sn = _ws_now.get("node")
+            if _sn is not None:
+                clear_node_job(_sn)
+            st.toast("⏹ Live workload stopped."); st.rerun()
+        # 🧹 CLEAR — সব assignment মুছে দেয়
+        if _bc3.button("🧹 Clear all", use_container_width=True):
             clear_all_node_jobs(); stop_workload(); st.rerun()
 
     # ── TAB 3 ──
-    with tab3:
+    if view == VIEWS[2]:
         idle_nodes = get_idle_nodes()
         idle_count = len(idle_nodes)
         active_count = 5 - idle_count

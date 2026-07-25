@@ -8,3 +8,4 @@ psutil
 GPUtil
 py3nvml
 wmi
+tzdata

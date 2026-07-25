@@ -108,11 +108,18 @@ def _live_gpu_label() -> str:
                 return str(det[0]["name"])
     except Exception:
         pass
+    blob = ""
     try:
-        cpu = (platform.processor() or "").strip()
+        blob = f"{platform.processor()} {platform.machine()}".lower()
     except Exception:
-        cpu = ""
-    return f"Integrated Graphics · {cpu}" if cpu else "Integrated Graphics (shared memory)"
+        blob = ""
+    if "intel" in blob:
+        return "Intel Integrated Graphics"
+    if "amd" in blob or "ryzen" in blob or "radeon" in blob:
+        return "AMD Radeon Graphics"
+    if "apple" in blob or "arm" in blob:
+        return "Apple GPU"
+    return "Integrated Graphics"
 
 
 def _get_live_data():
