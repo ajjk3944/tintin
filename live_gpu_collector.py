@@ -271,10 +271,8 @@ class LiveGPUCollector:
             # Create wave patterns for realistic variation
             time_wave = np.sin(current_time / 10 + state['phase'])
             
-            # Base utilization influenced by system load
-            utilization = state['base_util'] + system_factor * 30 + time_wave * 15
-            utilization += np.random.normal(0, 5)
-            utilization = max(5, min(98, utilization))
+            # Use real CPU load as GPU utilization proxy for integrated graphics
+            utilization = round(cpu_load, 1)  # real system/CPU load as proxy
             
             # Temperature correlates with utilization
             temp_from_util = (utilization - 50) * 0.3
@@ -282,11 +280,10 @@ class LiveGPUCollector:
             temperature = base_temp + temp_from_util + np.random.normal(0, 2)
             temperature = max(40, min(90, temperature))
             
-            # Memory usage influenced by system memory
-            memory_used_pct = state['base_memory'] + (mem_load / 2) + time_wave * 10
-            memory_used_pct = max(10, min(80, memory_used_pct))
-            memory_total = 24.0  # Typical GPU memory in GB
-            memory_used = (memory_used_pct / 100) * memory_total
+            # Integrated GPU has no dedicated VRAM — show REAL system RAM
+            vm = psutil.virtual_memory()
+            memory_total = round(vm.total / (1024**3), 1)   # real total RAM (GB)
+            memory_used  = round(vm.used  / (1024**3), 2)   # real RAM in use (GB)
             
             # Power correlates with utilization
             power_from_util = (utilization - 50) * 2
