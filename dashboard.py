@@ -692,7 +692,7 @@ The job is assigned to the node with the **highest score**. If a node turns Crit
                     hovertemplate="Cycle %{x}<br>Helpful: %{y}%<extra></extra>",
                     name=""  # Empty name to prevent "undefined" from showing
                 ))
-                _lf.update_yaxes(range=[0, 105], ticksuffix="%", title="")
+                _lf.update_yaxes(range=[0, 105], ticksuffix="%", title="Helpful Decisions (%)")
                 _lf.update_xaxes(title="Cycle", dtick=1)
                 _lf.update_layout(showlegend=False)  # Hide legend completely
                 st.plotly_chart(brand_fig(_lf, 300, ""), use_container_width=True)
